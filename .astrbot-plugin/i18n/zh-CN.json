@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "display_name": "Immich 鸣潮图库同步",
+    "short_desc": "Immich 角色相册与 XWUID 图片库映射同步",
+    "desc": "同步 Immich 角色相册与 XWUID 面板图、背景图图库。"
+  },
+  "views": {
+    "gallery-sync": {
+      "title": "鸣潮图库映射",
+      "description": "编辑面板图、背景图的 Immich 相册映射并补齐角色相册。"
+    }
+  }
+}
