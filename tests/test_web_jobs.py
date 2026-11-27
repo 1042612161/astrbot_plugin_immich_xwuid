@@ -13,7 +13,7 @@ class WebJobLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = main.ImmichXWUIDSync.__new__(main.ImmichXWUIDSync)
         self.plugin._sync_jobs = {}
         self.plugin._sync_job_cleanup = {}
-        self.plugin._get_mappings = AsyncMock(return_value={"panel": {"折枝": "折枝-竖图"}})
+        self.plugin._get_mappings = AsyncMock(return_value={"panel": {"1105": "折枝-竖图"}})
         immich, waves = Mock(), Mock()
         immich.albums.return_value = [{"id": "album-1", "albumName": "折枝-竖图"}]
         immich.album_assets.return_value = []
@@ -40,7 +40,7 @@ class WebJobLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin._sync_job_cleanup)
 
     async def test_reading_completed_result_releases_record_and_timer(self):
-        await self.plugin._run_web_sync("job-1", ["折枝"], "panel")
+        await self.plugin._run_web_sync("job-1", ["1105"], "panel")
         cleanup = self.plugin._sync_job_cleanup["job-1"]
         response = await self.read_status()
         self.assertEqual(json.loads(response.body)["state"], "completed")
@@ -52,7 +52,7 @@ class WebJobLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_result_remains_readable_once_with_failure_reason(self):
         self.plugin._clients.side_effect = RuntimeError("模拟连接失败")
-        await self.plugin._run_web_sync("job-1", ["折枝"], "panel")
+        await self.plugin._run_web_sync("job-1", ["1105"], "panel")
         response = await self.read_status()
         result = json.loads(response.body)
         self.assertEqual(result["state"], "failed")
@@ -67,7 +67,7 @@ class WebJobLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 if fail:
                     self.plugin._clients.side_effect = RuntimeError("模拟连接失败")
                 with patch.object(main, "_UNREAD_RESULT_TIMEOUT", 0.01):
-                    await self.plugin._run_web_sync("job-1", ["折枝"], "panel")
+                    await self.plugin._run_web_sync("job-1", ["1105"], "panel")
                 self.assertIn("job-1", self.plugin._sync_jobs)
                 await asyncio.sleep(0.03)
                 self.assertFalse(self.plugin._sync_jobs)
@@ -76,7 +76,7 @@ class WebJobLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_job_releases_state_immediately(self):
         self.plugin._get_mappings.side_effect = asyncio.CancelledError
         with self.assertRaises(asyncio.CancelledError):
-            await self.plugin._run_web_sync("job-1", ["折枝"], "panel")
+            await self.plugin._run_web_sync("job-1", ["1105"], "panel")
         self.assertFalse(self.plugin._sync_jobs)
         self.assertFalse(self.plugin._sync_job_cleanup)
 

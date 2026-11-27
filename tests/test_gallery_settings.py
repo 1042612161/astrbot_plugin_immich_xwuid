@@ -16,7 +16,7 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = main.ImmichXWUIDSync.__new__(main.ImmichXWUIDSync)
         self.storage = {"gallery_config": {
             "specifications": {"panel": "竖图", "background": "横图"},
-            "mappings": {"panel": {"折枝": "手工相册"}, "background": {"折枝": "手工相册"}},
+            "mappings": {"panel": {"1105": "手工相册"}, "background": {"1105": "手工相册"}},
         }}
         self.plugin.get_kv_data = AsyncMock(side_effect=lambda key, default: deepcopy(self.storage.get(key, default)))
 
@@ -43,19 +43,19 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_changing_specifications_discards_both_tables_and_matches_new_names(self):
         response = await self.save_form({
             "specifications": {"panel": "立绘", "background": "壁纸"},
-            "mappings": {"panel": {"折枝": "手工相册"}, "background": {"折枝": "手工相册"}},
+            "mappings": {"panel": {"1105": "手工相册"}, "background": {"1105": "手工相册"}},
         })
         result = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(result["reset"])
-        self.assertEqual(result["mappings"], {"panel": {"折枝": "折枝-立绘"}, "background": {"折枝": "折枝-壁纸"}})
+        self.assertEqual(result["mappings"], {"panel": {"1105": "折枝-立绘"}, "background": {"1105": "折枝-壁纸"}})
         self.assertEqual(self.storage["gallery_config"]["mappings"], result["mappings"])
         self.immich.ensure_album.assert_not_called()
 
     async def test_changing_one_specification_also_rebuilds_other_table(self):
         response = await self.save_form({"specifications": {"panel": "立绘", "background": "横图"}})
         result = json.loads(response.body)
-        self.assertEqual(result["mappings"]["background"], {"折枝": "折枝-横图"})
+        self.assertEqual(result["mappings"]["background"], {"1105": "折枝-横图"})
 
     async def test_missing_new_album_leaves_mapping_empty_without_creating_it(self):
         response = await self.save_form({"specifications": {"panel": "不存在", "background": "壁纸"}})
@@ -66,7 +66,7 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
         response = await self.save_form(self.storage["gallery_config"])
         result = json.loads(response.body)
         self.assertFalse(result["reset"])
-        self.assertEqual(result["mappings"]["panel"], {"折枝": "手工相册"})
+        self.assertEqual(result["mappings"]["panel"], {"1105": "手工相册"})
 
     async def test_invalid_specifications_or_mappings_do_not_change_saved_data(self):
         original = deepcopy(self.storage)
@@ -74,7 +74,7 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
             {"specifications": {"panel": "", "background": "横图"}},
             {"specifications": {"panel": " 相同 ", "background": "相同"}},
             {"specifications": {"panel": "换\n行", "background": "横图"}},
-            {"mappings": {"panel": {"折枝": "未列出的相册"}}},
+            {"mappings": {"panel": {"1105": "未列出的相册"}}},
             {"mappings": {"panel": {"不存在的角色": "手工相册"}}},
             {"mappings": {"panel": []}},
         ]
@@ -84,12 +84,11 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(self.storage, original)
 
-    async def test_refresh_and_legacy_upgrade_preserve_manual_mapping(self):
-        self.storage = {"mappings": {"panel": {"折枝": "手工相册"}, "background": {}}}
+    async def test_refresh_preserves_manual_id_mapping(self):
         result = await self.plugin._api_data()
         self.assertEqual(result["specifications"], {"panel": "竖图", "background": "横图"})
-        self.assertEqual(result["mappings"]["panel"], {"折枝": "手工相册"})
-        self.assertEqual((await self.plugin._get_mappings())["panel"], {"折枝": "手工相册"})
+        self.assertEqual(result["mappings"]["panel"], {"1105": "手工相册"})
+        self.assertEqual((await self.plugin._get_mappings())["panel"], {"1105": "手工相册"})
 
     async def test_create_missing_albums_uses_saved_specification_names(self):
         self.storage["gallery_config"]["specifications"] = {"panel": "立绘", "background": "壁纸"}

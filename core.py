@@ -36,13 +36,16 @@ def validate_mappings(value: dict, albums: list[dict], roles: dict) -> dict:
         table = value.get(kind, {})
         if not isinstance(table, dict):
             raise ValueError("面板图和背景图映射必须是表单对象")
-        role_names = {role["name"] for role in roles[kind]}
-        for role, album in table.items():
-            if role not in role_names:
-                raise ValueError(f"XWUID 中不存在角色：{role}")
+        result[kind] = {}
+        role_ids = {str(role["id"]): role for role in roles[kind]}
+        for role_id, album in table.items():
+            role_id = str(role_id)
+            if role_id not in role_ids:
+                raise ValueError(f"XWUID 中不存在角色 ID：{role_id}")
             if not isinstance(album, str) or (album and album not in album_names):
-                raise ValueError(f"{role}：所选 Immich 相册不存在，请刷新列表")
-        result[kind] = dict(table)
+                role = role_ids[role_id]
+                raise ValueError(f"{role['name']}（{role_id}）：所选 Immich 相册不存在，请刷新列表")
+            result[kind][role_id] = album
     return result
 
 
@@ -53,13 +56,13 @@ def match_mappings(albums: list[dict], roles: dict, specifications: dict, mappin
         existing = (mappings or {}).get(kind, {})
         table = {}
         for role in roles[kind]:
-            name = role["name"]
-            if name in existing:
-                table[name] = existing[name]
+            role_id = str(role["id"])
+            if role_id in existing:
+                table[role_id] = existing[role_id]
             else:
-                candidate = role_album_name(name, kind, specifications)
+                candidate = role_album_name(role["name"], kind, specifications)
                 if candidate in album_names:
-                    table[name] = candidate
+                    table[role_id] = candidate
         result[kind] = table
     return result
 
@@ -104,3 +107,39 @@ def folders_by_type(panel_folders: list[dict], background_folders: list[dict]) -
         "panel": [{"id": str(x["char_id"]), "name": str(x.get("char_name") or x["char_id"])} for x in panel_folders],
         "background": [{"id": str(x["char_id"]), "name": str(x.get("char_name") or x["char_id"])} for x in background_folders],
     }
+
+
+def resolve_role_folders(folders: list[dict], tokens: list[str]) -> tuple[list[dict], list[str]]:
+    """Resolve an ID or an unambiguous display name without choosing a duplicate name."""
+    by_id = {str(folder["char_id"]): folder for folder in folders}
+    by_name: dict[str, list[dict]] = {}
+    for folder in folders:
+        name = str(folder.get("char_name") or folder["char_id"])
+        if str(folder["char_id"]) not in {str(item["char_id"]) for item in by_name.get(name, [])}:
+            by_name.setdefault(name, []).append(folder)
+
+    resolved: list[dict] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in by_id:
+            matches = [by_id[token]]
+        else:
+            matches = by_name.get(token, [])
+            if len(matches) > 1:
+                choices = "、".join(str(item["char_id"]) for item in matches)
+                raise ValueError(f"{token} 对应多个角色 ID（{choices}），请改用具体 ID。")
+        if not matches:
+            missing.append(token)
+            continue
+        for folder in matches:
+            role_id = str(folder["char_id"])
+            if role_id not in seen:
+                seen.add(role_id)
+                resolved.append(folder)
+    return resolved, missing
+
+
+def role_label(folder: dict) -> str:
+    name = str(folder.get("char_name") or folder["char_id"])
+    return f"{name} · {folder['char_id']}"

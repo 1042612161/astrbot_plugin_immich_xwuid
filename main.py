@@ -21,7 +21,8 @@ from astrbot.core.star.filter.command import GreedyStr
 from .clients import ImmichClient, WavesClient
 from .core import (
     DEFAULT_SPECIFICATIONS, classify_image, folders_by_type, match_mappings,
-    parse_sync_command, role_album_name, validate_mappings, validate_specifications,
+    parse_sync_command, resolve_role_folders, role_album_name, role_label,
+    validate_mappings, validate_specifications,
 )
 
 
@@ -29,7 +30,7 @@ from .core import (
 _UNREAD_RESULT_TIMEOUT = 30
 
 
-@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.0.2")
+@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.1.0")
 class ImmichXWUIDSync(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -78,9 +79,8 @@ class ImmichXWUIDSync(Star):
     async def _get_gallery_config(self):
         saved = await self.get_kv_data("gallery_config", None)
         if saved is None:
-            # Keep pre-1.0.2 manual mappings until specifications are changed.
             saved = {"specifications": dict(DEFAULT_SPECIFICATIONS),
-                     "mappings": await self.get_kv_data("mappings", {})}
+                     "mappings": {"panel": {}, "background": {}}}
         return saved
 
     async def _api_data(self):
@@ -172,18 +172,19 @@ class ImmichXWUIDSync(Star):
             albums = await asyncio.to_thread(immich.albums)
             album_by_name = {x.get("albumName"): x for x in albums}
             folders = await asyncio.to_thread(waves.folders, target)
-            folders_by_name = {x.get("char_name", x.get("char_id")): x for x in folders}
+            folders_by_id = {str(x["char_id"]): x for x in folders}
             plans = []
-            for role in roles:
-                folder = folders_by_name.get(role)
-                album_name = mappings.get(target, {}).get(role)
+            for role_id in roles:
+                folder = folders_by_id.get(role_id)
+                role_name = role_label(folder) if folder else role_id
+                album_name = mappings.get(target, {}).get(role_id)
                 if not folder or not album_name or album_name not in album_by_name:
-                    job["failures"].append(f"{role}：未配置有效的 Immich 相册映射")
+                    job["failures"].append(f"{role_name}：未配置有效的 Immich 相册映射")
                     continue
                 assets = await asyncio.to_thread(immich.album_assets, album_by_name[album_name]["id"])
                 known = await asyncio.to_thread(waves.images, target, folder["char_id"])
                 known_names = {x.get("name") for x in known}
-                plans.append((role, folder, assets, known_names))
+                plans.append((role_name, folder, assets, known_names))
             job["total"] = sum(len(plan[2]) for plan in plans)
             job["progress"] = f"共 {job['total']} 张待检查图片"
             for role, folder, assets, known_names in plans:
@@ -250,11 +251,22 @@ class ImmichXWUIDSync(Star):
         if not urls:
             yield event.plain_result("没有找到图片。请将图片与命令一起发送，或引用图片后发送命令。")
             return
-        immich, _ = self._clients()
-        saved = await self._get_gallery_config()
-        specifications = validate_specifications(saved["specifications"])
-        album_names = {kind: saved["mappings"].get(kind, {}).get(name) or role_album_name(name, kind, specifications)
-                       for kind in DEFAULT_SPECIFICATIONS}
+        immich, waves = self._clients()
+        try:
+            catalogs = await asyncio.gather(*(asyncio.to_thread(waves.folders, kind) for kind in DEFAULT_SPECIFICATIONS))
+            resolved, missing = resolve_role_folders([folder for catalog in catalogs for folder in catalog], [name])
+            if missing:
+                raise ValueError(f"XWUID 中不存在角色或 ID：{name}")
+            folder = resolved[0]
+            role_id = str(folder["char_id"])
+            name = str(folder.get("char_name") or role_id)
+            saved = await self._get_gallery_config()
+            specifications = validate_specifications(saved["specifications"])
+            album_names = {kind: saved["mappings"].get(kind, {}).get(role_id) or role_album_name(name, kind, specifications)
+                           for kind in DEFAULT_SPECIFICATIONS}
+        except Exception as exc:
+            yield event.plain_result(f"无法选择上传相册：{exc}")
+            return
         existing = {x.get("albumName"): x for x in await asyncio.to_thread(immich.albums)}
         report = []
         async with httpx.AsyncClient(timeout=90) as client:
@@ -323,11 +335,12 @@ class ImmichXWUIDSync(Star):
             albums = await asyncio.to_thread(immich.albums)
             album_by_name = {x.get("albumName"): x for x in albums}
             folders = await asyncio.to_thread(waves.folders, target)
-            folders_by_name = {x.get("char_name", x.get("char_id")): x for x in folders}
-            done, duplicate, failed = 0, 0, []
-            for role in roles:
-                folder = folders_by_name.get(role)
-                album_name = mappings.get(target, {}).get(role)
+            selected_folders, missing_roles = resolve_role_folders(folders, roles)
+            done, duplicate, failed = 0, 0, [f"{role}：XWUID 中不存在对应角色或 ID" for role in missing_roles]
+            for folder in selected_folders:
+                role_id = str(folder["char_id"])
+                role = role_label(folder)
+                album_name = mappings.get(target, {}).get(role_id)
                 if not folder or not album_name or album_name not in album_by_name:
                     failed.append(f"{role}：未配置有效的 Immich 相册映射")
                     continue

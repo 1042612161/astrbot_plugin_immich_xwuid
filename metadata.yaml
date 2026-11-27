@@ -2,7 +2,7 @@ name: astrbot_plugin_immich_xwuid
 display_name: Immich 鸣潮图库同步
 short_desc: 将 Immich 角色相册同步到 XWUID 面板图和背景图库
 desc: 同步 Immich 角色相册与 XWUID 面板图、背景图图库
-version: v1.0.2
+version: v1.1.0
 author: Codex
 repo: https://github.com/1042612161/astrbot_plugin_immich_xwuid
 astrbot_version: ">=4.29.4,<5"
