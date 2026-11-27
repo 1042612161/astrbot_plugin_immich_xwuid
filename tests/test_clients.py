@@ -7,6 +7,26 @@ from astrbot_plugin_immich_xwuid.clients import ImmichClient, WavesClient
 
 
 class ClientContractTests(unittest.TestCase):
+    def test_waves_write_requests_pass_required_csrf_header_for_both_types(self):
+        for target_type, code in (("panel", "card"), ("background", "bg")):
+            with self.subTest(target_type=target_type):
+                seen = []
+
+                def respond(request):
+                    seen.append(request)
+                    if request.headers.get("X-Waves-Panel-Edit") != "1":
+                        return httpx.Response(403, json={"detail": "Cross-site request rejected"})
+                    if request.url.path.endswith("/tmp/upload"):
+                        return httpx.Response(200, json={"token": "token-1"})
+                    self.assertEqual(json.loads(request.read()), {"token": "token-1", "type": code, "char_id": "1306"})
+                    return httpx.Response(200, json={"ok": True, "name": "1306_test.jpg"})
+
+                client = WavesClient("https://waves.invalid", "admin", "test-only", transport=httpx.MockTransport(respond))
+                self.addCleanup(client.client.close)
+                result = client.upload_and_confirm(b"test-image", "IMG_8082.JPG", target_type, "1306")
+                self.assertEqual(result["status"], "success")
+                self.assertEqual([request.url.path.rsplit("/", 1)[-1] for request in seen], ["upload", "confirm"])
+
     def test_waves_upload_uses_tmp_then_confirm_and_never_forces_duplicate(self):
         seen = []
 

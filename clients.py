@@ -83,7 +83,8 @@ class WavesClient:
             raise ValueError("XWUID 编辑台只接受用户名 admin")
         self.base = base_url.rstrip("/")
         auth = base64.b64encode(f"{username}:{password}".encode()).decode()
-        self.client = httpx.Client(headers={"Authorization": f"Basic {auth}"}, timeout=timeout, transport=transport)
+        self.client = httpx.Client(headers={"Authorization": f"Basic {auth}", "X-Waves-Panel-Edit": "1"},
+                                   timeout=timeout, transport=transport)
 
     def folders(self, target_type: str) -> list[dict]:
         code = "card" if target_type == "panel" else "bg"

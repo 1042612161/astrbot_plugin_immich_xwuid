@@ -30,7 +30,7 @@ from .core import (
 _UNREAD_RESULT_TIMEOUT = 30
 
 
-@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.1.0")
+@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.1.1")
 class ImmichXWUIDSync(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -244,11 +244,11 @@ class ImmichXWUIDSync(Star):
             yield event.plain_result("用法：上传相册 折枝（同时发送或引用图片）")
             return
         try:
-            urls = await self._image_urls(event)
+            images = await self._image_sources(event)
         except RuntimeError as exc:
             yield event.plain_result(str(exc))
             return
-        if not urls:
+        if not images:
             yield event.plain_result("没有找到图片。请将图片与命令一起发送，或引用图片后发送命令。")
             return
         immich, waves = self._clients()
@@ -270,11 +270,10 @@ class ImmichXWUIDSync(Star):
         existing = {x.get("albumName"): x for x in await asyncio.to_thread(immich.albums)}
         report = []
         async with httpx.AsyncClient(timeout=90) as client:
-            for index, url in enumerate(urls, 1):
+            for index, sources in enumerate(images, 1):
                 try:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    with Image.open(io.BytesIO(response.content)) as image:
+                    data, source = await self._read_image(sources, client)
+                    with Image.open(io.BytesIO(data)) as image:
                         image.load()
                         width, height = image.size
                         image_format = (image.format or "JPEG").lower()
@@ -290,14 +289,14 @@ class ImmichXWUIDSync(Star):
                         await asyncio.to_thread(immich.share_album_with_all_editors, album["id"])
                         existing[album_names[kind]] = album
                     # Upload through Immich asset endpoint, then attach the returned asset to the album.
-                    digest = base64.b64encode(hashlib.sha1(response.content).digest()).decode()
+                    digest = base64.b64encode(hashlib.sha1(data).digest()).decode()
                     timestamp = datetime.now(timezone.utc).isoformat()
-                    source_name = Path(urlparse(url).path).name
+                    source_name = Path(urlparse(source).path if source.startswith(("http://", "https://")) else source).name
                     if Path(source_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
                         source_name = f"{name}-{index}.{extension}"
                     upload = await client.post(str(self._cfg("immich_url")).rstrip("/") + "/api/assets", headers={"x-api-key": str(self._cfg("immich_api_key"))},
                                                data={"deviceAssetId": f"astrbot-{name}-{digest}", "deviceId": "astrbot-immich-xwuid", "fileCreatedAt": timestamp, "fileModifiedAt": timestamp, "checksum": digest},
-                                               files={"assetData": (source_name, response.content, media_type)})
+                                               files={"assetData": (source_name, data, media_type)})
                     upload.raise_for_status()
                     uploaded = upload.json()
                     asset_id = uploaded.get("id")
@@ -379,14 +378,15 @@ class ImmichXWUIDSync(Star):
             yield event.plain_result(f"同步失败：{exc}")
 
     @staticmethod
-    async def _image_urls(event):
+    async def _image_sources(event):
+        """Collect each image's local paths followed by its HTTP(S) alternatives."""
         message = getattr(getattr(event, "message_obj", None), "message", [])
 
         def image_fields(chain):
             images = []
             for segment in chain or []:
                 if isinstance(segment, ImageComponent):
-                    images.append({"url": segment.url, "file": segment.file})
+                    images.append({"path": segment.path, "url": segment.url, "file": segment.file})
                 elif isinstance(segment, dict) and segment.get("type") == "image":
                     images.append(segment.get("data", {}))
             return images
@@ -401,8 +401,7 @@ class ImmichXWUIDSync(Star):
             try:
                 result = await call(action=action, **params)
             except Exception as exc:
-                label = "引用消息" if action == "get_msg" else "图片链接"
-                raise RuntimeError(f"读取{label}失败，请检查消息是否已失效或重新发送图片") from exc
+                raise RuntimeError("读取引用消息失败，请检查消息是否已失效或重新发送图片") from exc
             if not isinstance(result, dict):
                 raise RuntimeError("读取图片失败：OneBot 返回的数据格式无效")
             result = result.get("data", result)
@@ -426,14 +425,48 @@ class ImmichXWUIDSync(Star):
                     chain = quoted.get("message", [])
                 images.extend(image_fields(chain))
 
-        urls = []
+        sources = []
         for index, fields in enumerate(images, 1):
-            url = next((fields.get(key) for key in ("url", "file")
-                        if isinstance(fields.get(key), str) and fields[key].startswith(("http://", "https://"))), None)
-            if url is None and fields.get("file"):
-                info = await onebot_action("get_image", file=fields["file"])
-                url = info.get("url")
-            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-                raise RuntimeError(f"第 {index} 张图片没有可下载的链接，请重新发送图片")
-            urls.append(url)
-        return list(dict.fromkeys(urls))
+            local, remote = [], []
+            for key in ("path", "url", "file"):
+                value = fields.get(key)
+                if not isinstance(value, str) or not value:
+                    continue
+                if value.startswith(("http://", "https://")):
+                    remote.append(value)
+                elif Path(value).is_absolute():
+                    local.append(value)
+            candidates = tuple(dict.fromkeys(local + remote))
+            if not candidates:
+                raise RuntimeError(f"第 {index} 张图片没有可读取的本地路径或 HTTP/HTTPS 链接，请重新发送图片")
+            sources.append(candidates)
+        return list(dict.fromkeys(sources))
+
+    @staticmethod
+    async def _read_image(sources, client):
+        """Read a source without creating or deleting AstrBot's local media files."""
+        reason = "没有可读取的图片来源，请重新发送图片"
+        for source in sources:
+            if source.startswith(("http://", "https://")):
+                try:
+                    response = await client.get(source)
+                    response.raise_for_status()
+                    return response.content, source
+                except httpx.HTTPStatusError as exc:
+                    reason = f"图片下载失败（HTTP {exc.response.status_code}），请重新发送图片"
+                except httpx.RequestError:
+                    reason = "图片下载失败，请检查网络或重新发送图片"
+            else:
+                path = Path(source)
+                try:
+                    if not path.is_absolute():
+                        reason = "图片来源不是普通本地路径或 HTTP/HTTPS 链接"
+                    elif not path.exists():
+                        reason = "本地图片不存在，请重新发送图片"
+                    elif not path.is_file():
+                        reason = "本地图片路径不是普通文件，请重新发送图片"
+                    else:
+                        return await asyncio.to_thread(path.read_bytes), source
+                except (OSError, ValueError):
+                    reason = "本地图片读取失败，请检查文件权限或重新发送图片"
+        raise RuntimeError(reason)

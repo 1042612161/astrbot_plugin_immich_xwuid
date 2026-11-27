@@ -94,7 +94,7 @@ class RoleIdSyncTests(unittest.IsolatedAsyncioTestCase):
         self.waves.upload_and_confirm.assert_not_called()
 
     async def test_ambiguous_chat_upload_stops_before_http_upload(self):
-        self.plugin._image_urls = AsyncMock(return_value=["https://example.invalid/image.png"])
+        self.plugin._image_sources = AsyncMock(return_value=[("https://example.invalid/image.png",)])
         event = SimpleNamespace(plain_result=lambda text: text)
         messages = [text async for text in self.plugin.upload_album(event, "漂泊者·衍射")]
         self.assertIn("请改用具体 ID", messages[-1])
