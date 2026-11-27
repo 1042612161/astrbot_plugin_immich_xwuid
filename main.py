@@ -30,7 +30,7 @@ from .core import (
 _UNREAD_RESULT_TIMEOUT = 30
 
 
-@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.1.1")
+@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.1.2")
 class ImmichXWUIDSync(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -269,6 +269,8 @@ class ImmichXWUIDSync(Star):
             return
         existing = {x.get("albumName"): x for x in await asyncio.to_thread(immich.albums)}
         report = []
+        album_checksums = {}
+        counts = {"created": 0, "reused": 0, "skipped": 0, "failed": 0}
         async with httpx.AsyncClient(timeout=90) as client:
             for index, sources in enumerate(images, 1):
                 try:
@@ -288,29 +290,54 @@ class ImmichXWUIDSync(Star):
                         album = await asyncio.to_thread(immich.ensure_album, album_names[kind])
                         await asyncio.to_thread(immich.share_album_with_all_editors, album["id"])
                         existing[album_names[kind]] = album
-                    # Upload through Immich asset endpoint, then attach the returned asset to the album.
                     digest = base64.b64encode(hashlib.sha1(data).digest()).decode()
-                    timestamp = datetime.now(timezone.utc).isoformat()
-                    source_name = Path(urlparse(source).path if source.startswith(("http://", "https://")) else source).name
-                    if Path(source_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
-                        source_name = f"{name}-{index}.{extension}"
-                    upload = await client.post(str(self._cfg("immich_url")).rstrip("/") + "/api/assets", headers={"x-api-key": str(self._cfg("immich_api_key"))},
-                                               data={"deviceAssetId": f"astrbot-{name}-{digest}", "deviceId": "astrbot-immich-xwuid", "fileCreatedAt": timestamp, "fileModifiedAt": timestamp, "checksum": digest},
-                                               files={"assetData": (source_name, data, media_type)})
-                    upload.raise_for_status()
-                    uploaded = upload.json()
-                    asset_id = uploaded.get("id")
-                    if asset_id:
-                        await asyncio.to_thread(immich.add_to_album, album["id"], [asset_id])
-                    if uploaded.get("status") == "duplicate" and asset_id:
-                        report.append(f"{index}. Immich 已有相同图片，已加入{album_names[kind]}")
-                    elif asset_id:
-                        report.append(f"{index}. 已上传到{album_names[kind]}")
+                    album_id = album["id"]
+                    if album_id not in album_checksums:
+                        album_checksums[album_id] = await asyncio.to_thread(immich.album_checksums, album_id)
+                    if digest in album_checksums[album_id]:
+                        counts["skipped"] += 1
+                        report.append(f"{index}. {album_names[kind]}已存在相同图片，跳过")
+                        continue
+                    checked = await asyncio.to_thread(immich.check_upload, digest)
+                    if checked["action"] == "reject":
+                        if checked["isTrashed"]:
+                            raise RuntimeError("回收站已有相同图片，请先在 Immich 恢复后重试")
+                        asset_id, status = checked["assetId"], "duplicate"
                     else:
-                        report.append(f"{index}. 失败：Immich 未返回资产编号")
+                        timestamp = datetime.now(timezone.utc).isoformat()
+                        source_name = Path(urlparse(source).path if source.startswith(("http://", "https://")) else source).name
+                        if Path(source_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+                            source_name = f"{name}-{index}.{extension}"
+                        upload = await client.post(str(self._cfg("immich_url")).rstrip("/") + "/api/assets", headers={
+                            "x-api-key": str(self._cfg("immich_api_key")), "x-immich-checksum": digest,
+                        }, data={"deviceAssetId": f"astrbot-{name}-{digest}", "deviceId": "astrbot-immich-xwuid",
+                                 "fileCreatedAt": timestamp, "fileModifiedAt": timestamp},
+                            files={"assetData": (source_name, data, media_type)})
+                        upload.raise_for_status()
+                        uploaded = upload.json()
+                        asset_id, status = uploaded.get("id"), uploaded.get("status")
+                        if not isinstance(asset_id, str) or not asset_id or status not in ("created", "duplicate"):
+                            raise RuntimeError("Immich 未返回有效的资产编号或上传状态")
+                    added = await asyncio.to_thread(immich.add_to_album, album_id, [asset_id])
+                    # Record only successful uploads/associations; a failed image may be retried in this batch.
+                    album_checksums[album_id].add(digest)
+                    if not added:
+                        counts["skipped"] += 1
+                        report.append(f"{index}. {album_names[kind]}已存在相同图片，跳过")
+                    elif status == "duplicate":
+                        counts["reused"] += 1
+                        report.append(f"{index}. 已复用 Immich 已有图片并加入{album_names[kind]}")
+                    else:
+                        counts["created"] += 1
+                        report.append(f"{index}. 已上传到{album_names[kind]}")
                 except Exception as exc:
+                    counts["failed"] += 1
                     report.append(f"{index}. 失败：{exc}")
-        yield event.plain_result("相册上传完成\n" + "\n".join(report))
+        yield event.plain_result(
+            f"相册上传完成：共 {len(images)} 张\n新上传：{counts['created']}\n"
+            f"复用已有图片并加入相册：{counts['reused']}\n目标相册已存在，跳过：{counts['skipped']}\n"
+            f"失败：{counts['failed']}\n\n" + "\n".join(report)
+        )
 
     @filter.command("同步背景图相册")
     @filter.permission_type(filter.PermissionType.ADMIN)

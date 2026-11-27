@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import unittest
 
@@ -7,6 +9,61 @@ from astrbot_plugin_immich_xwuid.clients import ImmichClient, WavesClient
 
 
 class ClientContractTests(unittest.TestCase):
+    def immich_client(self, respond):
+        client = ImmichClient("https://immich.invalid", "test-key")
+        client.client.close()
+        client.client = httpx.Client(base_url=client.base, transport=httpx.MockTransport(respond))
+        self.addCleanup(client.client.close)
+        return client
+
+    def test_immich_album_checksums_include_all_pages_and_normalize_hex(self):
+        raw = hashlib.sha1(b"same bytes").digest()
+        seen = []
+
+        def respond(request):
+            body = json.loads(request.read())
+            seen.append(body)
+            checksum = base64.b64encode(raw).decode() if len(seen) == 1 else raw.hex()
+            return httpx.Response(200, json={"assets": {"items": [{"checksum": checksum}],
+                                                       "nextPage": 2 if len(seen) == 1 else None}})
+
+        client = self.immich_client(respond)
+        self.assertEqual(client.album_checksums("shared-album"), {base64.b64encode(raw).decode()})
+        self.assertEqual([body["page"] for body in seen], [1, 2])
+
+    def test_immich_album_checksums_reject_invalid_or_missing_checksums(self):
+        for asset in ({}, {"checksum": None}, {"checksum": "not-a-checksum"}, {"checksum": "YQ=="}):
+            with self.subTest(asset=asset):
+                client = self.immich_client(lambda request: httpx.Response(200, json={"assets": {"items": [asset]}}))
+                with self.assertRaisesRegex(RuntimeError, "校验和"):
+                    client.album_checksums("album")
+
+    def test_immich_album_query_rejects_malformed_success_response(self):
+        for payload in ({}, [], {"assets": {}}, {"assets": {"items": None}}):
+            with self.subTest(payload=payload):
+                client = self.immich_client(lambda request: httpx.Response(200, json=payload))
+                with self.assertRaisesRegex(RuntimeError, "查询返回异常"):
+                    client.album_checksums("album")
+
+    def test_immich_attach_duplicate_is_idempotent_but_permission_error_is_not(self):
+        for error in ("duplicate", "no_permission", "not_found"):
+            with self.subTest(error=error):
+                client = self.immich_client(lambda request: httpx.Response(200, json=[
+                    {"id": "asset", "success": False, "error": error},
+                ]))
+                if error == "duplicate":
+                    self.assertFalse(client.add_to_album("album", ["asset"]))
+                else:
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        client.add_to_album("album", ["asset"])
+
+    def test_immich_attach_rejects_empty_or_mismatched_response(self):
+        for payload in ([], {}, [{"id": "wrong-asset", "success": True}]):
+            with self.subTest(payload=payload):
+                client = self.immich_client(lambda request: httpx.Response(200, json=payload))
+                with self.assertRaisesRegex(RuntimeError, "返回异常"):
+                    client.add_to_album("album", ["asset"])
+
     def test_waves_write_requests_pass_required_csrf_header_for_both_types(self):
         for target_type, code in (("panel", "card"), ("background", "bg")):
             with self.subTest(target_type=target_type):
@@ -80,7 +137,7 @@ class ClientContractTests(unittest.TestCase):
             if request.method == "PUT" and request.url.path == "/api/albums/a1/users":
                 return httpx.Response(200, json={})
             if request.method == "PUT" and request.url.path == "/api/albums/a1/assets":
-                return httpx.Response(200, json=[])
+                return httpx.Response(200, json=[{"id": "asset-1", "success": True}])
             raise AssertionError((request.method, request.url))
 
         client = ImmichClient("https://immich.example", "test-key")

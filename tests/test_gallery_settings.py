@@ -25,6 +25,9 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
 
         self.plugin.put_kv_data = AsyncMock(side_effect=save)
         self.immich, self.waves = Mock(), Mock()
+        self.immich.album_checksums.side_effect = lambda album_id: set()
+        self.immich.check_upload.return_value = {"action": "accept"}
+        self.immich.add_to_album.return_value = True
         self.immich.albums.return_value = [
             {"id": "manual", "albumName": "手工相册"},
             {"id": "old-panel", "albumName": "折枝-竖图"},
@@ -126,7 +129,7 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
         client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         with patch.object(main.httpx, "AsyncClient", return_value=client):
             messages = [message async for message in self.plugin.upload_album(event, "折枝")]
-        self.assertNotIn("失败", messages[-1])
+        self.assertIn("失败：0", messages[-1])
 
 
 if __name__ == "__main__":

@@ -28,8 +28,11 @@ class ImmichClient:
                 body["page"] = page
             response = self.client.post("/search/metadata", json=body)
             response.raise_for_status()
-            result = response.json().get("assets", {})
-            assets.extend(result.get("items", []))
+            payload = response.json()
+            result = payload.get("assets") if isinstance(payload, dict) else None
+            if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+                raise RuntimeError("Immich 相册图片查询返回异常，请重试")
+            assets.extend(result["items"])
             next_cursor = result.get("nextCursor")
             next_page = result.get("nextPage")
             if not result.get("items") or (next_cursor in (None, "") and next_page in (None, "", False)):
@@ -43,6 +46,39 @@ class ImmichClient:
         response = self.client.get(f"/assets/{quote(asset_id)}/original")
         response.raise_for_status()
         return response.content, response.headers.get("content-type", "image/jpeg")
+
+    def album_checksums(self, album_id: str) -> set[str]:
+        checksums = set()
+        for asset in self.album_assets(album_id):
+            try:
+                value = asset["checksum"]
+                raw = bytes.fromhex(value) if len(value) == 40 else base64.b64decode(value, validate=True)
+                if len(raw) != 20:
+                    raise ValueError("Not a SHA-1 checksum")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("相册图片缺少有效 SHA-1 校验和，无法安全查重") from exc
+            checksums.add(base64.b64encode(raw).decode())
+        return checksums
+
+    def check_upload(self, checksum: str) -> dict:
+        response = self.client.post("/assets/bulk-upload-check", json={
+            "assets": [{"id": checksum, "checksum": checksum}],
+        })
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+            raise RuntimeError("Immich 查重返回异常，请重试")
+        result = results[0]
+        if result.get("id") != checksum:
+            raise RuntimeError("Immich 查重返回的图片编号不匹配，请重试")
+        if result.get("action") == "accept":
+            return result
+        if (result.get("action") == "reject" and result.get("reason") == "duplicate"
+                and isinstance(result.get("assetId"), str) and result["assetId"]
+                and isinstance(result.get("isTrashed"), bool)):
+            return result
+        raise RuntimeError("Immich 查重未返回可用结果，请重试")
 
     def ensure_album(self, name: str) -> dict:
         for album in self.albums():
@@ -67,13 +103,19 @@ class ImmichClient:
             result = self.client.put(f"/albums/{quote(album_id)}/users", json=payload)
             result.raise_for_status()
 
-    def add_to_album(self, album_id: str, asset_ids: list[str]) -> None:
+    def add_to_album(self, album_id: str, asset_ids: list[str]) -> bool:
+        """Attach assets, returning whether any were added; existing membership is harmless."""
         response = self.client.put(f"/albums/{quote(album_id)}/assets", json={"ids": asset_ids})
         response.raise_for_status()
         results = response.json()
-        errors = [item for item in results if not item.get("success")]
+        if (not isinstance(results, list) or len(results) != len(asset_ids)
+                or any(not isinstance(item, dict) for item in results)
+                or {item.get("id") for item in results} != set(asset_ids)):
+            raise RuntimeError("Immich 加入相册返回异常，请重试")
+        errors = [item for item in results if not item.get("success") and item.get("error") != "duplicate"]
         if errors:
             raise RuntimeError("Immich 未能将图片加入相册：" + "; ".join(item.get("errorMessage") or item.get("error", "未知原因") for item in errors))
+        return any(item.get("success") for item in results)
 
 
 class WavesClient:

@@ -33,6 +33,9 @@ class ImageUploadTests(unittest.IsolatedAsyncioTestCase):
 
         self.plugin = main.ImmichXWUIDSync.__new__(main.ImmichXWUIDSync)
         self.immich, self.waves = Mock(), Mock()
+        self.immich.album_checksums.side_effect = lambda album_id: set()
+        self.immich.check_upload.return_value = {"action": "accept"}
+        self.immich.add_to_album.return_value = True
         self.immich.albums.return_value = [
             {"id": "panel-album", "albumName": "折枝-竖图"},
             {"id": "background-album", "albumName": "折枝-横图"},
@@ -73,7 +76,7 @@ class ImageUploadTests(unittest.IsolatedAsyncioTestCase):
         client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         with patch.object(main.httpx, "AsyncClient", return_value=client):
             messages = [message async for message in self.plugin.upload_album(event, "折枝")]
-        self.assertNotIn("失败", messages[-1])
+        self.assertIn("失败：0", messages[-1])
         self.assertEqual(uploaded, expected_contents)
         self.immich.ensure_album.assert_not_called()
         self.immich.share_album_with_all_editors.assert_not_called()
