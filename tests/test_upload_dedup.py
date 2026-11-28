@@ -2,7 +2,9 @@ import base64
 import hashlib
 import io
 import json
+import re
 import unittest
+from uuid import UUID
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -80,13 +82,14 @@ class UploadDedupTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json=self.attach_result)
         self.fail(f"Unexpected request: {request.method} {path}")
 
-    async def run_upload(self, contents=None):
+    async def run_upload(self, contents=None, sources=None):
         contents = contents or [self.contents[0]]
+        sources = sources or [f"https://qq.invalid/{i}.png" for i in range(len(contents))]
         event = SimpleNamespace(
             message_obj=SimpleNamespace(message=[Image(file=f"https://qq.invalid/{i}.png") for i in range(len(contents))]),
             plain_result=lambda text: text,
         )
-        self.plugin._read_image = AsyncMock(side_effect=[(data, f"https://qq.invalid/{i}.png") for i, data in enumerate(contents)])
+        self.plugin._read_image = AsyncMock(side_effect=list(zip(contents, sources)))
         client = httpx.AsyncClient(transport=httpx.MockTransport(self.respond))
         with patch.object(main.httpx, "AsyncClient", return_value=client):
             messages = [message async for message in self.plugin.upload_album(event, "折枝")]
@@ -94,6 +97,50 @@ class UploadDedupTests(unittest.IsolatedAsyncioTestCase):
 
     def paths(self, method=None):
         return [r.url.path for r in self.requests if method is None or r.method == method]
+
+    def uploaded_filename(self):
+        upload = next(r for r in reversed(self.requests) if r.url.path == "/api/assets")
+        return re.search(rb'filename="([^"]+)"', upload.read()).group(1).decode()
+
+    async def test_each_new_upload_uses_unique_character_uuid_filename(self):
+        names = []
+        for source in ("https://qq.invalid/same.png", "https://qq.invalid/same.png",
+                       "C:/images/same.png", "https://qq.invalid/download?id=1"):
+            await self.run_upload(sources=[source])
+            filename = self.uploaded_filename()
+            self.assertRegex(filename, r"^折枝_[0-9a-f]{32}\.png$")
+            token = filename.removeprefix("折枝_").removesuffix(".png")
+            self.assertEqual(UUID(hex=token).version, 4)
+            names.append(filename)
+        self.assertEqual(len(set(names)), len(names))
+
+    async def test_filename_extension_follows_bytes_instead_of_source_suffix(self):
+        for image_format, extension in (("JPEG", "jpg"), ("PNG", "png"),
+                                        ("WEBP", "webp"), ("GIF", "gif"),
+                                        ("BMP", "bmp"), ("TIFF", "tiff")):
+            with self.subTest(image_format=image_format):
+                with io.BytesIO() as buffer:
+                    with PillowImage.new("RGB", (10, 20), color="blue") as image:
+                        image.save(buffer, image_format)
+                    data = buffer.getvalue()
+                checksum = base64.b64encode(hashlib.sha1(data).digest()).decode()
+                self.checksums.append(checksum)
+                self.check_results = [{"id": checksum, "action": "accept"}]
+                await self.run_upload([data], ["https://qq.invalid/misleading.jpeg"])
+                self.assertRegex(self.uploaded_filename(), rf"^折枝_[0-9a-f]{{32}}\.{extension}$")
+
+    async def test_skip_and_reuse_do_not_generate_or_update_filenames(self):
+        with patch.object(main, "uuid4") as uuid:
+            self.assets = [{"id": "album-asset", "checksum": self.checksums[0]}]
+            await self.run_upload()
+            self.assets = []
+            self.check_results = [{"id": self.checksums[0], "action": "reject", "reason": "duplicate",
+                                   "assetId": "owned-asset", "isTrashed": False}]
+            self.attach_result = [{"id": "owned-asset", "success": True}]
+            await self.run_upload()
+            uuid.assert_not_called()
+        self.assertNotIn("/api/assets", self.paths())
+        self.assertFalse(any(r.method == "PATCH" for r in self.requests))
 
     async def test_shared_album_same_bytes_skip_without_upload_or_attach(self):
         self.assets = [{"id": "other-user-asset", "checksum": self.checksums[0], "ownerId": "other-user"}]

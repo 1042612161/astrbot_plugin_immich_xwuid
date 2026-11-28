@@ -8,7 +8,6 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -33,7 +32,7 @@ _LATEST_SYNC_KEY = "latest_sync"
 _MAX_SYNC_FAILURE_DETAILS = 99
 
 
-@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.2.0")
+@register("astrbot_plugin_immich_xwuid", "Codex", "Immich 与鸣潮 XWUID 面板图/背景图同步", "1.2.1")
 class ImmichXWUIDSync(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -386,7 +385,7 @@ class ImmichXWUIDSync(Star):
         async with httpx.AsyncClient(timeout=90) as client:
             for index, sources in enumerate(images, 1):
                 try:
-                    data, source = await self._read_image(sources, client)
+                    data, _ = await self._read_image(sources, client)
                     with Image.open(io.BytesIO(data)) as image:
                         image.load()
                         width, height = image.size
@@ -395,7 +394,7 @@ class ImmichXWUIDSync(Star):
                         "jpeg": ("jpg", "image/jpeg"), "jpg": ("jpg", "image/jpeg"),
                         "png": ("png", "image/png"), "webp": ("webp", "image/webp"),
                         "gif": ("gif", "image/gif"), "bmp": ("bmp", "image/bmp"),
-                    }.get(image_format, ("jpg", "image/jpeg"))
+                    }.get(image_format, (image_format, Image.MIME.get(image_format.upper(), "application/octet-stream")))
                     kind = classify_image(width, height)
                     album = existing.get(album_names[kind])
                     if not album:
@@ -417,9 +416,7 @@ class ImmichXWUIDSync(Star):
                         asset_id, status = checked["assetId"], "duplicate"
                     else:
                         timestamp = datetime.now(timezone.utc).isoformat()
-                        source_name = Path(urlparse(source).path if source.startswith(("http://", "https://")) else source).name
-                        if Path(source_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
-                            source_name = f"{name}-{index}.{extension}"
+                        source_name = f"{name}_{uuid4().hex}.{extension}"
                         upload = await client.post(str(self._cfg("immich_url")).rstrip("/") + "/api/assets", headers={
                             "x-api-key": str(self._cfg("immich_api_key")), "x-immich-checksum": digest,
                         }, data={"deviceAssetId": f"astrbot-{name}-{digest}", "deviceId": "astrbot-immich-xwuid",
