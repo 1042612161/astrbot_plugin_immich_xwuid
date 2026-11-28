@@ -20,22 +20,25 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await new Promise(resolve => server?.close(resolve)); });
 
-async function page(t, viewport = {width: 1440, height: 1000}) {
+async function page(t, viewport = {width: 1440, height: 1000}, options = {}) {
   const page = await browser.newPage({viewport});
   t.after(() => page.close());
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  await page.addInitScript(() => {
+  await page.addInitScript(options => {
     const clone = value => JSON.parse(JSON.stringify(value));
     const roles = [{id: "1502", name: "漂泊者·衍射"}, {id: "1105", name: "折枝"}, {id: "1103", name: "白芷"}, {id: "1501", name: "漂泊者·衍射"}];
     let data = {roles: {panel: roles, background: roles}, albums: ["折枝-竖图", "折枝-横图", "白芷-竖图", "鸣潮杂图-竖图", "鸣潮杂图-横图", "漂泊者·衍射-竖图", "漂泊者·衍射-横图", "折枝-立绘", "折枝-壁纸"].map((name, id) => ({id: String(id), name})), specifications: {panel: "竖图", background: "横图"}, mappings: {panel: {"1105": "折枝-竖图", "1103": "白芷-竖图", "1501": "漂泊者·衍射-竖图", "1502": "漂泊者·衍射-竖图"}, background: {"1105": "折枝-横图"}}};
-    window.__posts = []; window.__polls = 0;
+    window.__posts = []; window.__polls = 0; window.__hasJob = Boolean(options.latest);
+    if (options.latest) data.last_sync = options.latest;
     window.AstrBotPluginView = {
       ready: async () => {},
       apiGet: async route => {
         if (route === "refresh") return clone(data);
+        if (!window.__hasJob) return {state: "idle"};
+        if (window.__transient) { window.__transient--; throw new Error("模拟网络断开"); }
+        if (options.latest?.state !== "running" && options.latest) return clone(options.latest);
         window.__polls++;
-        if (window.__expired) return {error: "同步任务不存在或已过期。"};
         return window.__polls === 1 ? {state: "running", progress: "正在同步折枝", success: 0, duplicate: 0, failures: []} : {state: "completed", progress: "同步完成", success: 3, duplicate: 2, failures: ["折枝 · 1105/test.jpg：比例错误"]};
       },
       apiPost: async (route, body) => {
@@ -46,11 +49,12 @@ async function page(t, viewport = {width: 1440, height: 1000}) {
           return {ok: true, reset, ...clone(data)};
         }
         if (route === "create-albums") return {count: 2};
+        window.__hasJob = true;
         return {job_id: "job-1"};
       },
     };
     window.confirm = () => { throw new Error("Native confirm is forbidden"); };
-  });
+  }, options);
   await page.goto(base);
   await page.waitForFunction(() => document.querySelector("#notice").textContent.includes("已读取"));
   return page;
@@ -144,14 +148,57 @@ test("sync submits IDs and displays final results at the top without continued p
   assert.equal(await p.locator("#sync-button").isDisabled(), false);
 });
 
-test("expired sync restores controls and displays its reason", async t => {
+test("temporary polling failure reconnects without reporting a failed task", async t => {
   const p = await page(t);
-  await p.evaluate(() => window.__expired = true);
+  await p.evaluate(() => window.__transient = 1);
   await p.locator("#role-search").fill("1105"); await p.locator(".role-option input").check();
   await p.locator("#sync-button").click();
-  await p.waitForFunction(() => document.querySelector("#task-title").textContent === "同步失败");
-  assert.match(await p.locator("#task-text").textContent(), /同步任务不存在或已过期/);
+  await p.waitForFunction(() => document.querySelector("#task-title").textContent === "正在重新连接任务");
+  assert.equal(await p.locator("#sync-button").isDisabled(), true);
+  assert.match(await p.locator("#task-text").textContent(), /后台任务不会因页面断开而停止/);
+  await p.waitForFunction(() => document.querySelector("#task-title").textContent === "同步已完成", {timeout: 10000});
   assert.equal(await p.locator("#sync-button").isDisabled(), false);
+  assert.equal((await p.evaluate(() => window.__posts)).filter(x => x.route === "sync").length, 1);
+});
+
+test("reopened page restores durable completed result and full failure count", async t => {
+  const p = await page(t, {width: 1100, height: 800}, {latest: {
+    job_id: "old", state: "completed", progress: "上次任务已完成", success: 9, duplicate: 2,
+    failure_count: 120, failures: ["失败示例"], failure_details_truncated: true,
+  }});
+  assert.equal(await p.locator("#task-title").textContent(), "同步已完成");
+  assert.match(await p.locator("#task-results").textContent(), /失败 120/);
+  assert.match(await p.locator("#task-results").textContent(), /仅保留前 99 条/);
+  await p.reload();
+  await p.waitForFunction(() => document.querySelector("#task-title").textContent === "同步已完成");
+  assert.match(await p.locator("#task-text").textContent(), /上次任务已完成/);
+  assert.equal(await p.evaluate(() => window.__polls), 0);
+});
+
+test("reopened page reconnects running task without posting another sync", async t => {
+  const p = await page(t, {width: 1100, height: 800}, {latest: {
+    job_id: "old", state: "running", progress: "上次任务还在运行", failures: [],
+  }});
+  await p.waitForFunction(() => document.querySelector("#task-title").textContent === "同步已完成");
+  assert.equal((await p.evaluate(() => window.__posts)).length, 0);
+});
+
+test("interrupted task is displayed and does not restart automatically", async t => {
+  const p = await page(t, {width: 1100, height: 800}, {latest: {
+    job_id: "old", state: "interrupted", progress: "进程重启，任务未自动重跑", failures: [],
+  }});
+  assert.equal(await p.locator("#task-title").textContent(), "同步已中断");
+  assert.equal(await p.locator("#sync-button").isDisabled(), false);
+  assert.equal((await p.evaluate(() => window.__posts)).length, 0);
+});
+
+test("task status scrolls normally without sticky positioning", async t => {
+  const p = await page(t, {width: 1100, height: 400});
+  const before = await p.locator("#taskbar").boundingBox();
+  assert.equal(await p.locator("#taskbar").evaluate(el => getComputedStyle(el).position), "static");
+  await p.evaluate(() => scrollTo(0, 180));
+  const after = await p.locator("#taskbar").boundingBox();
+  assert.ok(before.y - after.y > 100);
 });
 
 test("unsaved mappings and specifications block synchronization", async t => {

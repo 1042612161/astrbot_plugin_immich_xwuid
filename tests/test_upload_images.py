@@ -110,6 +110,35 @@ class ImageUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([request.method for request in seen], ["POST"])
         event.bot.call_action.assert_not_awaited()
 
+    async def test_quoted_forward_upload_uses_configured_cap_and_reports_truncation(self):
+        event = self.event([Reply(id="123")])
+        event.bot.call_action.side_effect = [
+            {"message": [{"type": "forward", "data": {"id": "root"}}]},
+            {"messages": [{"content": [
+                {"type": "image", "data": {"file": str(self.paths[0])}},
+                {"type": "image", "data": {"file": str(self.paths[1])}},
+            ]}]},
+        ]
+        original = self.plugin._cfg
+        self.plugin._cfg = lambda key, default="": 1 if key == "forward_max_images" else original(key, default)
+        _, messages = await self.upload(event, [self.contents[0]])
+        self.assertIn("已截断", messages[-1])
+        self.assertIn("上限 1 张", messages[-1])
+
+    async def test_forward_depth_truncation_is_visible_even_without_images(self):
+        event = self.event([Reply(id="123")])
+        event.bot.call_action.side_effect = [
+            {"message": [{"type": "forward", "data": {"id": "root"}}]},
+            {"messages": [{"content": [{"type": "forward", "data": {"id": "child"}}]}]},
+        ]
+        original = self.plugin._cfg
+        self.plugin._cfg = lambda key, default="": 0 if key == "forward_max_depth" else original(key, default)
+        messages = [message async for message in self.plugin.upload_album(event, "折枝")]
+        self.assertIn("没有找到图片", messages[-1])
+        self.assertIn("已截断", messages[-1])
+        self.assertIn("上限 0 层", messages[-1])
+        self.immich.albums.assert_not_called()
+
     async def test_missing_local_file_falls_back_to_http_url(self):
         url = "https://qq.invalid/0.png"
         event = self.event([Image(file=str(self.root / "missing.png"), url=url)])

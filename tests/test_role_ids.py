@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from PIL import Image
+from job_helpers import setup_jobs, make_job
 
 from astrbot_plugin_immich_xwuid import main
 from astrbot_plugin_immich_xwuid.core import match_mappings, resolve_role_folders, validate_mappings
@@ -48,9 +49,7 @@ class RoleIdDomainTests(unittest.TestCase):
 class RoleIdSyncTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.plugin = main.ImmichXWUIDSync.__new__(main.ImmichXWUIDSync)
-        self.plugin._sync_jobs = {"job": {"state": "running", "progress": "", "success": 0,
-                                          "duplicate": 0, "failures": [], "total": 0, "processed": 0}}
-        self.plugin._sync_job_cleanup = {}
+        setup_jobs(self.plugin)
         self.plugin._get_mappings = AsyncMock(return_value={"panel": {"1501": "相册一", "1502": "相册二"}})
         self.immich, self.waves = Mock(), Mock()
         self.immich.albums.return_value = [{"id": "one", "albumName": "相册一"}, {"id": "two", "albumName": "相册二"}]
@@ -63,21 +62,17 @@ class RoleIdSyncTests(unittest.IsolatedAsyncioTestCase):
         self.waves.upload_and_confirm.return_value = {"status": "success"}
         self.plugin._clients = Mock(return_value=(self.immich, self.waves))
 
-    def tearDown(self):
-        for job_id in list(self.plugin._sync_jobs):
-            self.plugin._discard_sync_job(job_id)
-
     async def test_web_sync_uses_the_selected_id_instead_of_the_last_same_name(self):
-        await self.plugin._run_web_sync("job", ["1501"], "panel")
+        await self.plugin._run_web_sync(make_job(["1501"]))
         self.immich.album_assets.assert_called_once_with("one")
         self.waves.images.assert_called_once_with("panel", "1501")
         self.assertEqual(self.waves.upload_and_confirm.call_args.args[-1], "1501")
-        self.assertEqual(self.plugin._sync_jobs["job"]["success"], 1)
+        self.assertEqual((await self.plugin._read_latest_sync())["success"], 1)
 
     async def test_web_sync_does_not_accept_display_names_instead_of_ids(self):
-        await self.plugin._run_web_sync("job", ["漂泊者·衍射"], "panel")
+        await self.plugin._run_web_sync(make_job(["漂泊者·衍射"]))
         self.waves.upload_and_confirm.assert_not_called()
-        self.assertEqual(len(self.plugin._sync_jobs["job"]["failures"]), 1)
+        self.assertEqual(len((await self.plugin._read_latest_sync())["failures"]), 1)
 
     async def test_chat_sync_accepts_id_and_targets_that_directory(self):
         event = SimpleNamespace(plain_result=lambda text: text)
@@ -94,7 +89,7 @@ class RoleIdSyncTests(unittest.IsolatedAsyncioTestCase):
         self.waves.upload_and_confirm.assert_not_called()
 
     async def test_ambiguous_chat_upload_stops_before_http_upload(self):
-        self.plugin._image_sources = AsyncMock(return_value=[("https://example.invalid/image.png",)])
+        self.plugin._image_sources = AsyncMock(return_value=([("https://example.invalid/image.png",)], {"image_limit": False, "depth_limit": False}))
         event = SimpleNamespace(plain_result=lambda text: text)
         messages = [text async for text in self.plugin.upload_album(event, "漂泊者·衍射")]
         self.assertIn("请改用具体 ID", messages[-1])

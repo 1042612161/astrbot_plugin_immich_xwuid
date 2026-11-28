@@ -7,7 +7,8 @@ let state = {albums: [], roles: {panel: [], background: []}, mappings: {panel: {
 let mappingRows = {panel: [], background: []};
 const selected = {panel: new Set(), background: new Set()};
 let active = "panel", syncKind = "panel", busy = false, syncing = false, dirty = false;
-let openPicker = null, toastTimer;
+let openPicker = null, toastTimer, pollTimer;
+let polling = false, pageHidden = false;
 
 function notice(text, kind = "") {
   $("notice").textContent = text;
@@ -205,7 +206,7 @@ async function refresh() {
   setBusy(true); notice("正在读取 Immich 相册和 XWUID 角色列表…");
   try {
     const result = await bridge.apiGet("refresh"); if (result.error) throw new Error(result.error);
-    applyData(result); notice(`已读取 ${state.albums.length} 个 Immich 相册及 XWUID 角色列表。`, "ok"); return true;
+    applyData(result); if (result.last_sync) resumeTask(result.last_sync); notice(`已读取 ${state.albums.length} 个 Immich 相册及 XWUID 角色列表。`, "ok"); return true;
   } catch (error) { notice(`读取失败：${error.message}`, "error"); return false; }
   finally { setBusy(false); }
 }
@@ -236,17 +237,57 @@ $("create").onclick = async () => {
 };
 
 function showTask(result) {
-  $("taskbar").dataset.state = result.state === "running" ? "running" : result.state === "failed" ? "failed" : "done";
-  $("task-symbol").textContent = result.state === "running" ? "…" : result.state === "failed" ? "!" : "✓";
-  $("task-title").textContent = result.state === "running" ? "同步进行中" : result.state === "failed" ? "同步失败" : "同步已完成";
+  const failed = ["failed", "interrupted"].includes(result.state);
+  $("taskbar").dataset.state = result.state === "running" ? "running" : failed ? "failed" : "done";
+  $("task-symbol").textContent = result.state === "running" ? "…" : failed ? "!" : "✓";
+  $("task-title").textContent = result.state === "running" ? "同步进行中" : result.state === "interrupted" ? "同步已中断" : failed ? "同步失败" : "同步已完成";
   $("task-text").textContent = result.progress || "正在准备同步…";
   const results = $("task-results"); results.replaceChildren();
-  for (const [title, count, fail] of [["成功", result.success || 0, false], ["重复跳过", result.duplicate || 0, false], ["失败", result.failures?.length || 0, true]]) {
+  for (const [title, count, fail] of [["成功", result.success || 0, false], ["重复跳过", result.duplicate || 0, false], ["失败", result.failure_count ?? result.failures?.length ?? 0, true]]) {
     const item = document.createElement("span"); item.className = `result${fail ? " fail" : ""}`; item.textContent = `${title} ${count}`; results.append(item);
   }
   for (const failure of result.failures || []) { const item = document.createElement("div"); item.className = "result fail"; item.textContent = failure; item.style.width = "100%"; results.append(item); }
+  if (result.failure_details_truncated) { const item = document.createElement("div"); item.className = "result fail"; item.textContent = "失败明细仅保留前 99 条，失败总数包含所有失败。"; results.append(item); }
   $("task-detail").hidden = result.state === "running";
   results.classList.toggle("open", result.state !== "running");
+}
+
+function schedulePoll(delay = 1200) {
+  clearTimeout(pollTimer);
+  if (!pageHidden) pollTimer = setTimeout(pollTask, delay);
+}
+
+function resumeTask(result) {
+  clearTimeout(pollTimer);
+  if (result.state === "idle") {
+    syncing = false; renderSelection();
+    $("taskbar").dataset.state = "idle";
+    $("task-title").textContent = "等待同步任务";
+    $("task-text").textContent = "选择角色后开始同步；仅保留最近一次任务，关闭页面后后台继续执行。";
+    $("task-symbol").textContent = "↗";
+    $("task-results").classList.remove("open");
+    $("task-detail").hidden = true;
+    return;
+  }
+  showTask(result);
+  syncing = result.state === "running";
+  renderSelection();
+  if (syncing) schedulePoll();
+}
+
+async function pollTask() {
+  if (polling || pageHidden) return;
+  polling = true;
+  try {
+    const result = await bridge.apiGet("sync-status");
+    if (result.error) throw new Error(result.error);
+    resumeTask(result);
+  } catch (error) {
+    // A lost browser connection does not determine the worker's state.
+    $("task-title").textContent = "正在重新连接任务";
+    $("task-text").textContent = `暂时无法读取状态：${error.message}。后台任务不会因页面断开而停止，正在重试…`;
+    schedulePoll(3000);
+  } finally { polling = false; }
 }
 
 async function syncSelected(kind) {
@@ -257,16 +298,20 @@ async function syncSelected(kind) {
     if (!roles.length) throw new Error("请至少选择一个角色。");
     syncing = true; renderSelection();
     showTask({state: "running", progress: `正在准备同步${labels[kind]}…`});
-    $("taskbar").scrollIntoView({behavior: "smooth", block: "nearest"});
-    const started = await bridge.apiPost("sync", {type: kind, roles}); if (started.error) throw new Error(started.error);
-    while (true) {
-      const result = await bridge.apiGet("sync-status", {job_id: started.job_id}); if (result.error) throw new Error(result.error);
-      showTask(result);
-      if (result.state !== "running") break;
-      await new Promise(resolve => setTimeout(resolve, 1200));
+    const started = await bridge.apiPost("sync", {type: kind, roles});
+    if (started.error) {
+      syncing = false; renderSelection();
+      notice(started.error, "error"); toast(started.error);
     }
-  } catch (error) { notice(error.message, "error"); toast(error.message); if (syncing) showTask({state: "failed", progress: `同步状态读取失败：${error.message}`}); }
-  finally { syncing = false; renderSelection(); }
+    // Query the durable latest task even if another browser started it first.
+    await pollTask();
+  } catch (error) {
+    notice(error.message, "error"); toast(error.message);
+    if (syncing) {
+      $("task-text").textContent = "启动响应未确认，正在查询后台任务状态…";
+      schedulePoll();
+    }
+  }
 }
 
 $("refresh").onclick = refresh; $("refresh-inline").onclick = refresh;
@@ -288,5 +333,12 @@ window.addEventListener("scroll", event => {
   const rect = openPicker.trigger.getBoundingClientRect();
   if (Math.abs(rect.top - openPicker.top) > 1 || Math.abs(rect.left - openPicker.left) > 1) closePicker();
 }, true);
+window.addEventListener("pagehide", () => { pageHidden = true; clearTimeout(pollTimer); });
+window.addEventListener("pageshow", event => { if (event.persisted) { pageHidden = false; pollTask(); } });
 await bridge.ready();
 await refresh();
+// Restore status independently of catalog availability, including completed results.
+try {
+  const latest = await bridge.apiGet("sync-status");
+  if (!latest.error) resumeTask(latest);
+} catch { schedulePoll(3000); }

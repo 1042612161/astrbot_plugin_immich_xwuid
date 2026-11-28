@@ -22,7 +22,7 @@ class ImageExtractionTests(unittest.IsolatedAsyncioTestCase):
             Image(file="https://example.invalid/zhezhi-2.png"),
             Image(file="https://example.invalid/zhezhi-1.jpg"),
         ])
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [
             ("https://example.invalid/zhezhi-1.jpg",), ("https://example.invalid/zhezhi-2.png",),
         ])
         event.bot.call_action.assert_not_awaited()
@@ -33,28 +33,28 @@ class ImageExtractionTests(unittest.IsolatedAsyncioTestCase):
             Reply(id="456"),
             Image(file="https://example.invalid/current.jpg"),
         ])
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [("https://example.invalid/current.jpg",)])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [("https://example.invalid/current.jpg",)])
         event.bot.call_action.assert_not_awaited()
 
     async def test_quoted_component_chain_does_not_fetch_message_again(self):
         event = self.event([Plain("上传相册 折枝"), Reply(id="123", chain=[
             Plain("图片"), Image(file="https://example.invalid/quoted.jpg"),
         ])])
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [("https://example.invalid/quoted.jpg",)])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [("https://example.invalid/quoted.jpg",)])
         event.bot.call_action.assert_not_awaited()
 
     async def test_missing_reply_chain_uses_onebot_get_msg_with_bot_routing(self):
         event = self.event([Reply(id="123")], {"message": [
             {"type": "image", "data": {"url": "https://example.invalid/quoted.jpg"}},
         ]})
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [("https://example.invalid/quoted.jpg",)])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [("https://example.invalid/quoted.jpg",)])
         event.bot.call_action.assert_awaited_once_with(action="get_msg", message_id=123, self_id="12345")
 
     async def test_raw_onebot_reply_and_wrapped_response_are_supported(self):
         event = self.event([{"type": "reply", "data": {"id": "123"}}], {"data": {"message": [
             {"type": "image", "data": {"file": "https://example.invalid/quoted.png"}},
         ]}})
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [("https://example.invalid/quoted.png",)])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [("https://example.invalid/quoted.png",)])
 
     async def test_unsupported_sources_are_not_sent_to_onebot_get_image(self):
         for source in ("onebot-token", "file:///tmp/image.png", "base64://AAAA", "relative/image.png"):
@@ -78,12 +78,12 @@ class ImageExtractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_and_quote_without_images_return_empty_list(self):
         event = self.event([Reply(id="123", chain=[Plain("只有文本")])])
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [])
         event.bot.call_action.assert_not_awaited()
 
     async def test_plain_text_image_url_is_not_treated_as_an_image_component(self):
         event = self.event([Reply(id="123", chain=[Plain("https://example.invalid/image.jpg")])])
-        self.assertEqual(await ImmichXWUIDSync._image_sources(event), [])
+        self.assertEqual((await ImmichXWUIDSync._image_sources(event))[0], [])
         event.bot.call_action.assert_not_awaited()
 
 

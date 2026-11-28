@@ -3,5 +3,7 @@
   "immich_api_key": {"description":"允许读取/上传资产、管理相册并查看账号的 Immich API Key","type":"string","secret":true,"default":""},
   "xwuid_url": {"description":"XWUID 面板编辑台站点根地址，不要添加 /waves/panel-edit","type":"string","default":""},
   "xwuid_username": {"description":"编辑台只接受 admin；保留可编辑项以便显示服务端要求","type":"string","default":"admin"},
-  "xwuid_password": {"description":"XWUID 编辑台 WavesPanelEditPassword","type":"string","secret":true,"default":""}
+  "xwuid_password": {"description":"XWUID 编辑台 WavesPanelEditPassword","type":"string","secret":true,"default":""},
+  "forward_max_depth": {"description":"上传相册时解析合并转发中嵌套转发的最大层数。0 表示只读取被引用的合并转发本身；默认 1，最小为 0。","type":"int","default":1},
+  "forward_max_images": {"description":"上传相册时从当前消息、引用消息及转发内容中最多处理的图片数。超出时会在结果中说明已截断。默认 50，最小为 1。","type":"int","default":50}
 }

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 from PIL import Image
+from job_helpers import setup_jobs, make_job
 
 from astrbot_plugin_immich_xwuid.clients import WavesClient
 from astrbot_plugin_immich_xwuid.main import ImmichXWUIDSync
@@ -48,15 +49,11 @@ class SyncUploadTests(unittest.IsolatedAsyncioTestCase):
                     plugin = ImmichXWUIDSync.__new__(ImmichXWUIDSync)
                     plugin._clients = Mock(return_value=(immich, waves))
                     plugin._get_mappings = AsyncMock(return_value={target: {"1306": "offline-album"}})
-                    plugin._sync_job_cleanup = {}
-                    plugin._sync_jobs = {"job": {
-                        "state": "running", "progress": "", "success": 0, "duplicate": 0,
-                        "failures": [], "total": 0, "processed": 0,
-                    }}
+                    setup_jobs(plugin)
                     try:
                         if entry == "web":
-                            await plugin._run_web_sync("job", ["1306"], target)
-                            result = plugin._sync_jobs["job"]
+                            await plugin._run_web_sync(make_job(["1306"], target))
+                            result = (await plugin._read_latest_sync())
                             self.assertEqual(result["success"], 1)
                             self.assertEqual(result["failures"], [])
                         else:
@@ -69,7 +66,7 @@ class SyncUploadTests(unittest.IsolatedAsyncioTestCase):
                         immich.ensure_album.assert_not_called()
                         immich.add_to_album.assert_not_called()
                     finally:
-                        plugin._discard_sync_job("job")
+                        await plugin.terminate()
 
 
 if __name__ == "__main__":

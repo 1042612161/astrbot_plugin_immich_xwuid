@@ -116,7 +116,7 @@ class GallerySettingsTests(unittest.IsolatedAsyncioTestCase):
             buffer = io.BytesIO()
             Image.new("RGB", size).save(buffer, "PNG")
             images[f"https://example.invalid/{name}.png"] = buffer.getvalue()
-        self.plugin._image_sources = AsyncMock(return_value=[(url,) for url in images])
+        self.plugin._image_sources = AsyncMock(return_value=([(url,) for url in images], {"image_limit": False, "depth_limit": False}))
         self.plugin._cfg = lambda key, default="": {"immich_url": "https://immich.invalid", "immich_api_key": "test-key"}.get(key, default)
         event = SimpleNamespace(plain_result=lambda text: text)
 
